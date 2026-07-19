@@ -1,0 +1,119 @@
+name: Emscripten tip-of-tree
+
+# Daily canary build: install the tip-of-tree (tot) Emscripten SDK and build
+# CPython (python/cpython @ main) against it. This is an early-warning system
+# to catch breakages introduced by upstream Emscripten changes before they land
+# in a release that gets pinned in Platforms/emscripten/config.toml.
+
+on:
+  schedule:
+    # Run every day at 05:00 UTC.
+    - cron: '0 5 * * *'
+  # Allow manual runs from the Actions tab.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FORCE_COLOR: 1
+  # CPython source to build against emsdk tot.
+  CPYTHON_REPO: python/cpython
+  CPYTHON_REF: main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-emscripten-tot:
+    name: 'build and test against emsdk tot'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    steps:
+    - name: "Check out CPython"
+      uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      with:
+        repository: ${{ env.CPYTHON_REPO }}
+        ref: ${{ env.CPYTHON_REF }}
+        persist-credentials: false
+
+    - name: "Read Emscripten config"
+      id: emscripten-config
+      shell: python
+      run: |
+        import os
+        import tomllib
+        from pathlib import Path
+
+        config = tomllib.loads(Path("Platforms/emscripten/config.toml").read_text())
+        with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+            f.write(f"node-version={config['node-version']}\n")
+
+    - name: "Install Node.js"
+      uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+      with:
+        node-version: ${{ steps.emscripten-config.outputs.node-version }}
+
+    - name: "Install Python"
+      uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+      with:
+        python-version: '3.x'
+
+    - name: "Install and activate tip-of-tree Emscripten"
+      run: |
+        set -euxo pipefail
+        git clone --depth 1 https://github.com/emscripten-core/emsdk.git "$RUNNER_TEMP/emsdk"
+        cd "$RUNNER_TEMP/emsdk"
+        # "tot" is the latest tip-of-tree upstream Emscripten build.
+        ./emsdk install tot
+        ./emsdk activate tot
+
+        # Export the activated Emscripten environment to subsequent steps.
+        # Capture the PATH before sourcing so we can forward only the additions
+        # to $GITHUB_PATH, and forward the emsdk env vars to $GITHUB_ENV.
+        old_path="$PATH"
+        source ./emsdk_env.sh
+        {
+          echo "EMSDK=$EMSDK"
+          [ -n "${EM_CONFIG:-}" ] && echo "EM_CONFIG=$EM_CONFIG"
+          [ -n "${EMSDK_NODE:-}" ] && echo "EMSDK_NODE=$EMSDK_NODE"
+          [ -n "${EMSDK_PYTHON:-}" ] && echo "EMSDK_PYTHON=$EMSDK_PYTHON"
+        } >> "$GITHUB_ENV"
+        IFS=':' read -ra parts <<< "$PATH"
+        for p in "${parts[@]}"; do
+          case ":$old_path:" in
+            *":$p:"*) ;;                 # already present, skip
+            *) echo "$p" >> "$GITHUB_PATH" ;;
+          esac
+        done
+
+    - name: "Show Emscripten version"
+      run: emcc --version
+
+    - name: "Configure build Python"
+      run: python3 Platforms/emscripten configure-build-python -- --config-cache --with-pydebug
+
+    - name: "Make build Python"
+      run: python3 Platforms/emscripten make-build-python
+
+    - name: "Display build info of the build Python"
+      run: python3 Platforms/emscripten pythoninfo-build
+
+    - name: "Make dependencies"
+      run: python3 Platforms/emscripten make-dependencies
+
+    - name: "Configure host/Emscripten Python"
+      run: python3 Platforms/emscripten configure-host --host-runner node -- --config-cache
+
+    - name: "Make host/Emscripten Python"
+      run: python3 Platforms/emscripten make-host
+
+    - name: "Display build info of the host/Emscripten Python"
+      run: python3 Platforms/emscripten pythoninfo-host
+
+    - name: "Test"
+      run: python3 Platforms/emscripten run --test
+
+    - name: "Test Repl"
+      run: Platforms/emscripten/browser_test/run_test.sh
