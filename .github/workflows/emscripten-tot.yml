@@ -113,7 +113,9 @@ jobs:
       run: python3 Platforms/emscripten pythoninfo-host
 
     - name: "Test"
-      run: python3 Platforms/emscripten run --test
+      # test_libc_ver uses the Emscripten version from
+      # Platforms/emscripten/config.toml which doesn't match tip of tree
+      run: python3 Platforms/emscripten run --test -- --ignore test_libc_ver
 
     - name: "Test Repl"
       run: Platforms/emscripten/browser_test/run_test.sh
