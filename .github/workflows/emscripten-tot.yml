@@ -138,13 +138,41 @@ jobs:
     runs-on: ubuntu-latest
     environment: email
     timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
     steps:
+    - name: "Check whether the previous run succeeded"
+      id: previous
+      env:
+        GH_TOKEN: ${{ github.token }}
+        # inputs.* is empty on schedule runs.
+        FORCE_FAILURE: ${{ inputs.force_failure }}
+      run: |
+        set -euo pipefail
+        # Find the most recent completed run of this workflow on main other
+        # than the current one. Only email on a success -> failure transition
+        # so a persistent breakage doesn't produce a daily email. Manual runs
+        # with force_failure always send so the notification can be tested.
+        previous="$(gh api \
+          "repos/${GITHUB_REPOSITORY}/actions/workflows/emscripten-tot.yml/runs?branch=main&status=completed&per_page=10" \
+          --jq "[.workflow_runs[] | select(.id != ${GITHUB_RUN_ID})][0].conclusion // \"none\"")"
+        echo "Previous run conclusion: $previous"
+        if [[ "$previous" == "success" || "$previous" == "none" || "${FORCE_FAILURE}" == "true" ]]; then
+          echo "send=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "send=false" >> "$GITHUB_OUTPUT"
+          echo "::notice::Previous run also did not succeed ($previous); not sending email."
+        fi
+
     - name: "Check out this repository"
+      if: steps.previous.outputs.send == 'true'
       uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       with:
         persist-credentials: false
 
     - name: "Find most recent committer"
+      if: steps.previous.outputs.send == 'true'
       id: committer
       run: |
         set -euo pipefail
@@ -155,6 +183,7 @@ jobs:
         fi
 
     - name: "Send email"
+      if: steps.previous.outputs.send == 'true'
       uses: dawidd6/action-send-mail@47af4a10b540781705f283a2cf1a9650713ac795 # v23
       with:
         server_address: ${{ secrets.MAIL_SERVER }}
